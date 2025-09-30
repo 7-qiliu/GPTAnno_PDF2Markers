@@ -1,3 +1,4 @@
 outputs/
 papers/
-README.md
+README_tmp.md
+__pycache__/

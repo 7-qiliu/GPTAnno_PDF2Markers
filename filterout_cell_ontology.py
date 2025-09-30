@@ -3,6 +3,7 @@ import csv
 import os
 from glob import glob, escape as glob_escape
 from typing import Iterable, List, Set
+from util import load_gpt_mapping, map_annotations
 
 
 def normalize_text(value: str) -> str:
@@ -13,40 +14,6 @@ def normalize_text(value: str) -> str:
     return value.strip()
 
 
-def read_ontology_terms(ontology_csv_path: str, encoding: str = "utf-8") -> Set[str]:
-    """Read ontology terms from `cl_term_map.csv` and return a set of strings.
-
-    Expected columns: `key` and `cl_label`.
-    Rows with empty values are ignored.
-    """
-    term_set: Set[str] = set()
-
-    if not os.path.isfile(ontology_csv_path):
-        raise FileNotFoundError(
-            f"Ontology CSV not found: {ontology_csv_path}"
-        )
-
-    with open(ontology_csv_path, mode="r", newline="", encoding=encoding) as f:
-        reader = csv.DictReader(f)
-        if reader.fieldnames is None:
-            raise ValueError(
-                f"Ontology CSV missing header: {ontology_csv_path}"
-            )
-        # Remove BOM if present in the first header
-        reader.fieldnames = [
-            (name.lstrip("\ufeff") if name is not None else name)
-            for name in reader.fieldnames
-        ]
-
-        for row in reader:
-            key_val = row.get("key")
-            label_val = row.get("cl_label")
-            if key_val is not None and key_val.strip() != "":
-                term_set.add(normalize_text(key_val))
-            if label_val is not None and label_val.strip() != "":
-                term_set.add(normalize_text(label_val))
-
-    return term_set
 
 
 def find_final_csvs(input_dir: str) -> List[str]:
@@ -76,7 +43,7 @@ def compute_output_path(final_csv_path: str) -> str:
 
 def filter_final_csv(
     final_csv_path: str,
-    ontology_terms: Set[str],
+    mapping_db,
     encoding: str = "utf-8",
 ) -> int:
     """Filter rows from a final CSV where `full_cell_type_name` is in ontology terms.
@@ -104,14 +71,19 @@ def filter_final_csv(
             )
             return 0
 
+        # Read all rows first
+        all_rows = list(reader)
+        cell_type_values = [row.get("full_cell_type_name", "") for row in all_rows]
+        
+        # Use map_annotations to get mapping results
+        mapping_results = map_annotations(cell_type_values, mapping_db)
+        
         rows_out: List[dict] = []
         removed_count = 0
 
-        for row in reader:
-            cell_type_value = row.get("full_cell_type_name", "")
-            normalized_value = normalize_text(cell_type_value) if cell_type_value is not None else ""
-
-            if normalized_value and normalized_value in ontology_terms:
+        for i, row in enumerate(all_rows):
+            # Check if this cell type was matched (has a valid mapping)
+            if mapping_results.iloc[i]['matched'] is not None:
                 removed_count += 1
                 continue
             rows_out.append(row)
@@ -138,17 +110,18 @@ def run(
 
     print(f"[INFO] Scanning directory: {input_dir}")
     final_csv_paths = find_final_csvs(input_dir)
+    breakpoint()
     if not final_csv_paths:
         print("[WARN] No files matched pattern '3-final-*.csv' in the directory.")
         return
 
     print(f"[INFO] Loading ontology terms from: {ontology_csv_path}")
-    ontology_terms = read_ontology_terms(ontology_csv_path, encoding=encoding)
-    print(f"[INFO] Loaded {len(ontology_terms)} ontology terms")
+    mapping_db = load_gpt_mapping(ontology_csv_path, name_col_guess="x")
+    print(f"[INFO] Loaded {len(mapping_db.names)} ontology terms")
 
     total_removed = 0
     for csv_path in final_csv_paths:
-        removed = filter_final_csv(csv_path, ontology_terms, encoding=encoding)
+        removed = filter_final_csv(csv_path, mapping_db, encoding=encoding)
         total_removed += removed
 
     print(f"[INFO] Done. Total removed rows across files: {total_removed}")
@@ -169,7 +142,7 @@ def parse_args(argv: Iterable[str] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--ontology-csv",
-        default=os.path.join("./cell_ontology", "cl_term_map.csv"),
+        default=os.path.join("./cell_ontology", "GPTCelltype_mapping.csv"),
         help="Path to ontology CSV with columns 'key' and 'cl_label'",
     )
     parser.add_argument(
